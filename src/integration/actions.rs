@@ -2,13 +2,14 @@ use std::io;
 
 use super::registry::{integration_target_label, integration_target_supported};
 use super::targets::{
-    install_antigravity_cli, install_claude, install_codex, install_copilot, install_cursor,
-    install_devin, install_droid, install_grok, install_hermes, install_kilo, install_kimi,
-    install_letta, install_mastracode, install_omp, install_opencode, install_pi, install_qodercli,
-    install_qwen, uninstall_antigravity_cli, uninstall_claude, uninstall_codex, uninstall_copilot,
-    uninstall_cursor, uninstall_devin, uninstall_droid, uninstall_grok, uninstall_hermes,
-    uninstall_kilo, uninstall_kimi, uninstall_letta, uninstall_mastracode, uninstall_omp,
-    uninstall_opencode, uninstall_pi, uninstall_qodercli, uninstall_qwen,
+    install_antigravity_cli, install_bob, install_claude, install_codex, install_copilot,
+    install_cursor, install_devin, install_droid, install_grok, install_hermes, install_kilo,
+    install_kimi, install_letta, install_mastracode, install_omp, install_opencode, install_pi,
+    install_qodercli, install_qwen, uninstall_antigravity_cli, uninstall_bob, uninstall_claude,
+    uninstall_codex, uninstall_copilot, uninstall_cursor, uninstall_devin, uninstall_droid,
+    uninstall_grok, uninstall_hermes, uninstall_kilo, uninstall_kimi, uninstall_letta,
+    uninstall_mastracode, uninstall_omp, uninstall_opencode, uninstall_pi, uninstall_qodercli,
+    uninstall_qwen,
 };
 use super::version::{agent_version_requirement, enforce_agent_version};
 use super::{KIMI_MIN_VERSION, PI_EXTENSION_INSTALL_NAME};
@@ -771,4 +772,57 @@ pub(crate) fn uninstall_target(
 
     crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
     Ok(messages)
+}
+
+/// Experimental Bob install that bypasses the frozen client endpoint
+/// `IntegrationTarget` enum. Fold into the agent registry when it lands.
+pub(crate) fn install_experimental_bob() -> io::Result<Vec<String>> {
+    let result = install_bob().map(|installed| {
+        vec![
+            format!(
+                "installed bob integration hook to {}",
+                installed.hook_path.display()
+            ),
+            format!(
+                "ensured bob settings at {}",
+                installed.settings_path.display()
+            ),
+        ]
+    });
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    crate::logging::integration_action("install", "bob", outcome);
+    result
+}
+
+/// Experimental Bob uninstall counterpart.
+pub(crate) fn uninstall_experimental_bob() -> io::Result<Vec<String>> {
+    let result = uninstall_bob().map(|result| {
+        let mut messages = Vec::new();
+        if result.removed_hook_file {
+            messages.push(format!(
+                "removed bob hook at {}",
+                result.hook_path.display()
+            ));
+        } else {
+            messages.push(format!(
+                "no bob hook found at {}",
+                result.hook_path.display()
+            ));
+        }
+        if result.updated_settings {
+            messages.push(format!(
+                "removed herdr bob hook entry from {}",
+                result.settings_path.display()
+            ));
+        } else {
+            messages.push(format!(
+                "no herdr bob hook entry found in {}",
+                result.settings_path.display()
+            ));
+        }
+        messages
+    });
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    crate::logging::integration_action("uninstall", "bob", outcome);
+    result
 }

@@ -1,0 +1,204 @@
+name: Upstream Sync & Release
+
+on:
+  # Run weekly on Monday at 06:00 UTC — upstream cuts roughly weekly stable releases
+  schedule:
+    - cron: "0 6 * * 1"
+  # Also support manual triggers from the Actions UI or API
+  workflow_dispatch:
+
+permissions:
+  contents: write # push master, create tags, publish releases
+  issues: write   # open conflict notification issues
+
+jobs:
+  sync-and-build:
+    name: Sync with Upstream & Build macOS aarch64
+    # macos-latest is Apple Silicon (aarch64) on GitHub-hosted runners
+    runs-on: macos-latest
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout with full history and credentials for pushing
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 2. Git identity for merge commits and pushes
+      # -----------------------------------------------------------------------
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # -----------------------------------------------------------------------
+      # 3. Add upstream remote and find latest stable release tag
+      # -----------------------------------------------------------------------
+      - name: Fetch upstream tags and determine latest release
+        id: upstream
+        run: |
+          git remote add upstream https://github.com/herdrdev/herdr.git || true
+          git fetch upstream --tags
+
+          # Latest tag matching v* sorted by version semantics
+          LATEST_TAG=$(git tag -l "v*" --sort=-v:refname | head -n 1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::error::No upstream tags matching 'v*' found"
+            exit 1
+          fi
+
+          echo "Latest upstream tag: $LATEST_TAG"
+          echo "tag=$LATEST_TAG"             >> "$GITHUB_OUTPUT"
+          echo "release_tag=${LATEST_TAG}-bob" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # 4. Skip if fork master already contains this release
+      # -----------------------------------------------------------------------
+      - name: Check if already up to date
+        id: check
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          RELEASE_TAG="${{ steps.upstream.outputs.release_tag }}"
+
+          if git merge-base --is-ancestor "$TAG" HEAD; then
+            echo "Fork master already contains $TAG — nothing to do."
+            echo "should_sync=false" >> "$GITHUB_OUTPUT"
+          elif git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already published — nothing to do."
+            echo "should_sync=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New upstream release $TAG detected — proceeding."
+            echo "should_sync=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # -----------------------------------------------------------------------
+      # 5. Merge upstream tag onto master
+      #    Bob changes are purely additive so fast-forward usually succeeds.
+      #    Fall back to a 3-way merge; on conflict open an issue and abort.
+      # -----------------------------------------------------------------------
+      - name: Merge upstream tag
+        id: merge
+        if: steps.check.outputs.should_sync == 'true'
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          echo "Merging $TAG..."
+
+          if git merge --ff-only "$TAG"; then
+            echo "Fast-forward succeeded."
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          elif git merge --no-edit "$TAG"; then
+            echo "3-way merge succeeded without conflicts."
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Merge conflicts detected."
+            CONFLICTED=$(git diff --name-only --diff-filter=U)
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "conflicted_files<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$CONFLICTED"           >> "$GITHUB_OUTPUT"
+            echo "EOF"                   >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
+
+      # -----------------------------------------------------------------------
+      # 6. On conflict: open a GitHub issue so a human can resolve manually
+      # -----------------------------------------------------------------------
+      - name: Open conflict issue
+        if: steps.check.outputs.should_sync == 'true' && steps.merge.outputs.merged == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.upstream.outputs.tag }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicted_files }}
+        run: |
+          TITLE="Upstream sync conflict: $TAG"
+          EXISTING=$(gh issue list --search "$TITLE in:title" --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            echo "Issue #$EXISTING already open for $TAG."
+          else
+            gh issue create \
+              --title "$TITLE" \
+              --body "### Upstream sync conflict
+
+Automated sync with **$TAG** encountered merge conflicts and was aborted.
+
+**Conflicted files:**
+\`\`\`
+$CONFLICTS
+\`\`\`
+
+**To resolve manually:**
+\`\`\`bash
+git fetch upstream --tags
+git checkout master
+git merge $TAG
+# resolve conflicts in the files above
+git commit
+git push origin master
+\`\`\`"
+          fi
+          echo "::error::Merge conflict with $TAG — issue opened."
+          exit 1
+
+      # -----------------------------------------------------------------------
+      # 7. Install Zig 0.16.0 — required by vendored libghostty-vt
+      #    (Homebrew / system Zig is 0.17+ which is incompatible)
+      # -----------------------------------------------------------------------
+      - name: Install Zig 0.16.0
+        if: steps.check.outputs.should_sync == 'true' && steps.merge.outputs.merged == 'true'
+        run: |
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz \
+            -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/zig-0.16.0"
+          tar -xJf /tmp/zig.tar.xz --strip-components=1 -C "$HOME/zig-0.16.0"
+          "$HOME/zig-0.16.0/zig" version
+
+      # -----------------------------------------------------------------------
+      # 8. Rust stable toolchain
+      # -----------------------------------------------------------------------
+      - name: Install Rust toolchain
+        if: steps.check.outputs.should_sync == 'true' && steps.merge.outputs.merged == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      # -----------------------------------------------------------------------
+      # 9. Validate — cargo check before committing to a full build
+      # -----------------------------------------------------------------------
+      - name: Cargo check
+        if: steps.check.outputs.should_sync == 'true' && steps.merge.outputs.merged == 'true'
+        env:
+          ZIG: ${{ runner.home }}/zig-0.16.0/zig
+        run: cargo check
+
+      # -----------------------------------------------------------------------
+      # 10. Build macOS aarch64 release binary
+      # -----------------------------------------------------------------------
+      - name: Build release binary
+        if: steps.check.outputs.should_sync == 'true' && steps.merge.outputs.merged == 'true'
+        env:
+          ZIG: ${{ runner.home }}/zig-0.16.0/zig
+        run: |
+          cargo build --release
+          mkdir -p dist
+          cp target/release/herdr dist/herdr-macos-aarch64
+          tar -czf dist/herdr-macos-aarch64.tar.gz -C dist herdr-macos-aarch64
+
+      # -----------------------------------------------------------------------
+      # 11. Push updated master and publish a GitHub release with the binary
+      # -----------------------------------------------------------------------
+      - name: Push master and publish release
+        if: steps.check.outputs.should_sync == 'true' && steps.merge.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+          RELEASE_TAG: ${{ steps.upstream.outputs.release_tag }}
+        run: |
+          git push origin master
+
+          gh release create "$RELEASE_TAG" \
+            dist/herdr-macos-aarch64.tar.gz \
+            --title "herdr $RELEASE_TAG (macOS aarch64)" \
+            --notes "Automated sync with upstream [$UPSTREAM_TAG](https://github.com/herdrdev/herdr/releases/tag/$UPSTREAM_TAG) + Bob Shell agent integration." \
+            --target master

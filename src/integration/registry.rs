@@ -515,6 +515,27 @@ pub(crate) fn experimental_letta_integration_status() -> Option<super::Experimen
     })
 }
 
+/// Bob is intentionally kept out of the frozen client endpoint
+/// `IntegrationTarget` enum so published generation-1 clients never receive an
+/// unknown variant. It is installable and reportable as an experimental
+/// CLI-only target until the agent registry replaces the enum-keyed registry.
+pub(crate) fn experimental_bob_integration_status() -> Option<super::ExperimentalIntegrationStatus>
+{
+    let path = bob_dir()
+        .ok()?
+        .join("hooks")
+        .join(super::BOB_HOOK_INSTALL_NAME);
+    let (state, installed_version) =
+        integration_state_for_path(&path, super::BOB_INTEGRATION_VERSION);
+    Some(super::ExperimentalIntegrationStatus {
+        label: "bob",
+        path,
+        state,
+        installed_version,
+        expected_version: super::BOB_INTEGRATION_VERSION,
+    })
+}
+
 pub(crate) fn parse_integration_version(content: &str) -> Option<u32> {
     content.lines().find_map(|line| {
         let marker_line = line
